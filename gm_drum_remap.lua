@@ -14,8 +14,18 @@ ardour {
 N_REMAPPINGS = 8
 
 INVALID_NOTE = -1
+SAME_NOTE = -2
+
+-- range of notes that we want to remap
+-- note that you only have 16 midi channels so you can't send more than 16 notes to its own channel
 GM_MIN = 36
 GM_MAX = 59
+
+-- range of note remap choice. a smaller range makes the dropdown menu easier to navigate
+-- use 0,127 for any note
+-- 21,108 for piano range
+MIDI_MIN = 21
+MIDI_MAX = 108
 
 function dsp_ioconfig ()
     return { { midi_in = 1, midi_out = 1, audio_in = 0, audio_out = 0}, }
@@ -25,8 +35,9 @@ end
 function dsp_params ()
 
     local map_scalepoints = {}
-    map_scalepoints["None"] = INVALID_NOTE
-    for note=0,127 do
+    map_scalepoints["Same"] = SAME_NOTE
+    map_scalepoints["Off"] = INVALID_NOTE
+    for note=MIDI_MIN,MIDI_MAX do -- piano range
         local name = ARDOUR.ParameterDescriptor.midi_note_name(note)
         map_scalepoints[string.format("%03d - %s", note, name)] = note
     end
@@ -37,18 +48,18 @@ function dsp_params ()
         -- From and to
         table.insert(map_params, {
             ["type"] = "input",
-            name = ARDOUR.ParameterDescriptor.midi_note_name(i) .. " to note:",
-            min = -1,
+            name = string.format("%-4s", ARDOUR.ParameterDescriptor.midi_note_name(i)) .. " to note:",
+            min = -2,
             max = 127,
             default = INVALID_NOTE,
             integer = true,
             enum = true,
             scalepoints = map_scalepoints})
 
-        -- map_params[note_id] = {
         table.insert(map_params, {
             ["type"] = "input",
-            name = "__ to channel",
+            -- need two spaces to show one
+            name = "      _ to channel:",
             min = 1,
             max = 16,
             default = 1,
@@ -79,10 +90,20 @@ function dsp_run (_, _, n_samples)
     local translation_table = {}
     local ctrl = CtrlPorts:array()
     -- for i=1, N_REMAPPINGS*2, 2 do
-    for i=1, (GM_MAX - GM_MIN) do
-        if not (ctrl[i] == INVALID_NOTE) then
-            translation_table[i - 1 + GM_MIN] = {ctrl[i+1], ctrl[i]}
+    local ctrl_itr = 1
+    for i=GM_MIN, GM_MAX do
+        if (ctrl[ctrl_itr] == INVALID_NOTE) then
+            -- do nothing. emtpy table actually not required
+            translation_table[i] = {}
+        elseif (ctrl[ctrl_itr] == SAME_NOTE) then
+            -- change channel but keep same note
+            translation_table[i] = {ctrl[ctrl_itr+1], i}
+        else
+            -- change both note and channel
+            translation_table[i] = {ctrl[ctrl_itr+1], ctrl[ctrl_itr]}
         end
+
+        ctrl_itr = ctrl_itr + 2
     end
 
     -- for each incoming midi event
@@ -105,11 +126,16 @@ function dsp_run (_, _, n_samples)
                     new_note = t[2]
                     data[2] = new_note
                     data[1] = data[1] | new_channel
+                    -- we only send the message if we have a translation
+                    -- otherwise the note is blocked
+                    tx_midi (time, data)
                 end
+            else
+                -- block if outside of our gm range
+                -- tx_midi (time, data)
             end
-
-            tx_midi (time, data)
         else
+            -- pass through all other non-note events
             tx_midi (time, data)
         end
     end
